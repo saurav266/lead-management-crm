@@ -1,0 +1,51 @@
+# Render Blueprint. In the Render dashboard: New > Blueprint > select this
+# repo. Render reads this file and provisions the free Postgres database and
+# the web service together, wired to each other automatically.
+#
+# Free-tier caveats (see README "Deploy to Render" for details):
+#   - The free Postgres database is deleted 30 days after creation unless
+#     upgraded to a paid plan.
+#   - The free web service spins down after ~15 min of inactivity; the next
+#     request cold-starts it (tens of seconds).
+databases:
+  - name: leadflow-crm-db
+    plan: free
+    databaseName: crm
+    user: crm
+
+services:
+  - type: web
+    name: leadflow-crm
+    plan: free
+    env: node
+    # --include=dev on the client install: NODE_ENV=production below also
+    # applies during the build step, which makes plain `npm install` skip
+    # devDependencies -- and vite/tailwind/postcss (needed to actually build
+    # the client) live there, so the build silently produces no build tool
+    # without this flag.
+    buildCommand: cd client && npm install --include=dev && npm run build && cd ../server && npm install
+    startCommand: cd server && npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: leadflow-crm-db
+          property: connectionString
+      - key: SEED_ADMIN_NAME
+        value: Admin
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SHEET_TAB
+        value: Leads
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SHEET_SYNC_INTERVAL_MINUTES
+        value: "2"
