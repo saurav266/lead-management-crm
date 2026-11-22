@@ -148,3 +148,27 @@ CREATE TABLE IF NOT EXISTS lead_activities (
 
 CREATE INDEX IF NOT EXISTS idx_lead_activities_lead_created
 ON lead_activities(lead_id, created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS follow_up_activities (
+  id BIGSERIAL PRIMARY KEY,
+  lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  activity_type VARCHAR(50) NOT NULL,
+  scheduled_at TIMESTAMP NOT NULL,
+  status VARCHAR(50) NOT NULL DEFAULT 'Scheduled',
+  outcome VARCHAR(100),
+  notes TEXT,
+  completed_at TIMESTAMP,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_follow_up_activities_lead
+ON follow_up_activities(lead_id);
+
+CREATE INDEX IF NOT EXISTS idx_follow_up_activities_scheduled
+ON follow_up_activities(scheduled_at);
+
+CREATE INDEX IF NOT EXISTS idx_follow_up_activities_user
+ON follow_up_activities(user_id);
