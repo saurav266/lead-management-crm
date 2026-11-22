@@ -45,19 +45,25 @@ router.post(
     }
 
     const { token, expiresIn } = signToken(user, !!rememberMe);
-    res.cookie(AUTH_COOKIE, token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: env.nodeEnv === 'production',
-      maxAge: expiresInToMs(expiresIn),
-    });
+   res.cookie(AUTH_COOKIE, token, {
+  httpOnly: true,
+  sameSite: env.nodeEnv === 'production' ? 'none' : 'lax',
+  secure: env.nodeEnv === 'production',
+  maxAge: expiresInToMs(expiresIn),
+  path: '/',
+});
 
     res.json({ user: toPublicUser(user) });
   })
 );
 
 router.post('/logout', (req, res) => {
-  res.clearCookie(AUTH_COOKIE);
+  res.clearCookie(AUTH_COOKIE, {
+  httpOnly: true,
+  sameSite: env.nodeEnv === 'production' ? 'none' : 'lax',
+  secure: env.nodeEnv === 'production',
+  path: '/',
+});
   res.json({ ok: true });
 });
 

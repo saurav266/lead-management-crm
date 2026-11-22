@@ -27,14 +27,24 @@ export const requireAuth = asyncHandler(async (req, res, next) => {
   try {
     payload = jwt.verify(token, env.jwtSecret);
   } catch {
-    res.clearCookie(AUTH_COOKIE);
+    res.clearCookie(AUTH_COOKIE, {
+  httpOnly: true,
+  sameSite: env.nodeEnv === 'production' ? 'none' : 'lax',
+  secure: env.nodeEnv === 'production',
+  path: '/',
+});
     return res.status(401).json({ error: 'Session expired, please log in again' });
   }
 
   const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [payload.sub]);
   const user = rows[0];
   if (!user || !user.active) {
-    res.clearCookie(AUTH_COOKIE);
+    res.clearCookie(AUTH_COOKIE, {
+  httpOnly: true,
+  sameSite: env.nodeEnv === 'production' ? 'none' : 'lax',
+  secure: env.nodeEnv === 'production',
+  path: '/',
+});
     return res.status(401).json({ error: 'Account not found or deactivated' });
   }
 
