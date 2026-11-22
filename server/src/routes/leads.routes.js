@@ -131,6 +131,268 @@ router.get(
   })
 );
 
+
+// Follow-up Center: all scheduled and completed follow-ups.
+// Employees only see their own leads; admins can filter by employee.
+router.get(
+  '/follow-ups',
+  asyncHandler(async (req, res) => {
+    const where = [
+      `(NULLIF(leads.next_follow_up, '') IS NOT NULL OR leads.next_follow_up_status = 'Done')`,
+    ];
+    const values = [];
+
+    const bind = (value) => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+
+    if (req.user.role === 'employee') {
+      where.push(`leads.assigned_user_id = ${bind(req.user.id)}`);
+    } else if (req.query.assigned) {
+      const assignedId = Number(req.query.assigned);
+      if (!Number.isInteger(assignedId) || assignedId <= 0) {
+        throw new HttpError(400, 'Invalid employee ID');
+      }
+      where.push(`leads.assigned_user_id = ${bind(assignedId)}`);
+    }
+
+    if (req.query.search) {
+      const search = bind(`%${req.query.search}%`);
+      where.push(
+        `(leads.name ILIKE ${search} OR leads.mob ILIKE ${search} OR leads.email ILIKE ${search})`
+      );
+    }
+
+    const { rows } = await pool.query(
+      `${LEAD_SELECT}
+       WHERE ${where.join(' AND ')}
+       ORDER BY
+         CASE
+           WHEN leads.next_follow_up_status = 'Done' THEN 4
+           WHEN leads.next_follow_up ~ '^\\d{4}-\\d{2}-\\d{2}$'
+                AND leads.next_follow_up::date < CURRENT_DATE THEN 1
+           WHEN leads.next_follow_up ~ '^\\d{4}-\\d{2}-\\d{2}$'
+                AND leads.next_follow_up::date = CURRENT_DATE THEN 2
+           ELSE 3
+         END,
+         leads.next_follow_up ASC NULLS LAST`,
+      values
+    );
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    const counts = {
+      today: 0,
+      overdue: 0,
+      upcoming: 0,
+      completed: 0,
+    };
+
+    const leads = rows.map((lead) => {
+      let bucket = 'upcoming';
+
+      if (lead.next_follow_up_status === 'Done') {
+        bucket = 'completed';
+      } else if (lead.next_follow_up) {
+        if (lead.next_follow_up < today) bucket = 'overdue';
+        else if (lead.next_follow_up === today) bucket = 'today';
+      }
+
+      counts[bucket]++;
+
+      return { ...lead, follow_up_bucket: bucket };
+    });
+
+    res.json({ leads, counts });
+  })
+);
+
+// Kanban pipeline: returns all leads visible to the current user.
+// Employees can only see their own assigned leads.
+router.get(
+  '/pipeline',
+  asyncHandler(async (req, res) => {
+    const values = [];
+    let where = `WHERE (
+      leads.status IS NULL
+      OR leads.status IN ('Won', 'Lost', 'Not answered', 'Contacted', 'Broker')
+    )`;
+
+    if (req.user.role === 'employee') {
+      values.push(req.user.id);
+      where += ` AND leads.assigned_user_id = $${values.length}`;
+    }
+
+    const { rows } = await pool.query(
+      `${LEAD_SELECT}
+       ${where}
+       ORDER BY leads.updated_at DESC`,
+      values
+    );
+
+    res.json({ leads: rows });
+  })
+);
+
+
+const activitySchema = z.object({
+  activity_type: z.enum(['call', 'email', 'meeting', 'note', 'other']),
+  description: z.string().trim().min(1).max(5000),
+});
+
+// Create a new follow-up activity.
+const followUpCreateSchema = z.object({
+  activity_type: z.enum(['Call', 'Email', 'Meeting', 'Other']),
+
+  scheduled_at: z.string()
+    .refine(
+      (value) => !Number.isNaN(Date.parse(value)),
+      'Invalid date and time'
+    )
+    .nullable()
+    .optional(),
+
+  status: z.enum([
+    'Scheduled',
+    'Completed',
+    'Missed',
+    'Cancelled',
+    'No Response',
+  ]).optional(),
+
+  outcome: z.string().max(50).nullable().optional(),
+
+  notes: z.string().max(5000).nullable().optional(),
+});
+
+// Update an existing follow-up activity.
+const followUpActivityUpdateSchema = z.object({
+  scheduled_at: z.string()
+    .refine(
+      (value) => !Number.isNaN(Date.parse(value)),
+      'Invalid date and time'
+    )
+    .nullable()
+    .optional(),
+
+  status: z.enum([
+    'Scheduled',
+    'Completed',
+    'Missed',
+    'Cancelled',
+    'No Response',
+  ]).optional(),
+
+  outcome: z.string().max(50).nullable().optional(),
+
+  notes: z.string().max(5000).nullable().optional(),
+}).refine(
+  (data) => Object.keys(data).length > 0,
+  'At least one field is required'
+);
+
+
+// Get the lead's activity timeline.
+// Includes both manually recorded activities and existing audit history.
+router.get(
+  '/:id/activities',
+  asyncHandler(async (req, res) => {
+    const leadId = Number(req.params.id);
+
+    const leadResult = await pool.query(
+      'SELECT id, assigned_user_id FROM leads WHERE id = $1',
+      [leadId]
+    );
+
+    const lead = leadResult.rows[0];
+
+    if (!lead) throw new HttpError(404, 'Lead not found');
+
+    if (
+      req.user.role === 'employee' &&
+      lead.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    const { rows } = await pool.query(
+      `SELECT *
+       FROM (
+         SELECT
+           a.id,
+           a.activity_type AS type,
+           a.description,
+           a.created_at,
+           u.name AS user_name,
+           'activity' AS record_type
+         FROM lead_activities a
+         LEFT JOIN users u ON u.id = a.user_id
+         WHERE a.lead_id = $1
+
+         UNION ALL
+
+         SELECT
+           al.id,
+           'system' AS type,
+           CONCAT(
+             al.field,
+             ': ',
+             COALESCE(al.old_value, 'empty'),
+             ' → ',
+             COALESCE(al.new_value, 'empty')
+           ) AS description,
+           al.created_at,
+           u.name AS user_name,
+           'audit' AS record_type
+         FROM audit_log al
+         LEFT JOIN users u ON u.id = al.user_id
+         WHERE al.lead_id = $1
+       ) timeline
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [leadId]
+    );
+
+    res.json({ activities: rows });
+  })
+);
+
+// Record a call, email, meeting, note or other interaction.
+router.post(
+  '/:id/activities',
+  asyncHandler(async (req, res) => {
+    const leadId = Number(req.params.id);
+    const data = activitySchema.parse(req.body);
+
+    const leadResult = await pool.query(
+      'SELECT id, assigned_user_id FROM leads WHERE id = $1',
+      [leadId]
+    );
+
+    const lead = leadResult.rows[0];
+
+    if (!lead) throw new HttpError(404, 'Lead not found');
+
+    if (
+      req.user.role === 'employee' &&
+      lead.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO lead_activities
+        (lead_id, user_id, activity_type, description)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, lead_id, user_id, activity_type, description, created_at`,
+      [leadId, req.user.id, data.activity_type, data.description]
+    );
+
+    res.status(201).json({ activity: rows[0] });
+  })
+);
+
 // Every column the export can produce -- `key` is what a caller passes in
 // ?columns=a,b,c to pick a subset (order in the file follows this array's
 // order, not the caller's), `header` is the column's text in row 1 (kept
@@ -199,6 +461,183 @@ router.get(
   })
 );
 
+router.post(
+  '/:id/follow-ups',
+  asyncHandler(async (req, res) => {
+    const leadId = Number(req.params.id);
+
+    if (!Number.isInteger(leadId) || leadId <= 0) {
+      throw new HttpError(400, 'Invalid lead ID');
+    }
+
+    const data = followUpCreateSchema.parse(req.body);
+
+    const leadResult = await pool.query(
+      'SELECT id, assigned_user_id FROM leads WHERE id = $1',
+      [leadId]
+    );
+
+    const lead = leadResult.rows[0];
+
+    if (!lead) throw new HttpError(404, 'Lead not found');
+
+    if (
+      req.user.role === 'employee' &&
+      lead.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    const status = data.status || 'Scheduled';
+
+    const { rows } = await pool.query(
+      `INSERT INTO follow_up_activities
+        (
+          lead_id,
+          user_id,
+          activity_type,
+          scheduled_at,
+          status,
+          outcome,
+          notes,
+          completed_at
+        )
+       VALUES ($1, $2, $3, $4, $5, $6, $7,
+         CASE WHEN $5::varchar = 'Completed' THEN NOW() ELSE NULL END)
+       RETURNING *`,
+      [
+        leadId,
+        req.user.id,
+        data.activity_type,
+        data.scheduled_at ?? null,
+        status,
+        data.outcome ?? null,
+        data.notes ?? null,
+      ]
+    );
+
+    res.status(201).json({ followUp: rows[0] });
+  })
+);
+
+router.get(
+  '/:id/follow-ups',
+  asyncHandler(async (req, res) => {
+    const leadId = Number(req.params.id);
+
+    const leadResult = await pool.query(
+      'SELECT id, assigned_user_id FROM leads WHERE id = $1',
+      [leadId]
+    );
+
+    const lead = leadResult.rows[0];
+
+    if (!lead) throw new HttpError(404, 'Lead not found');
+
+    if (
+      req.user.role === 'employee' &&
+      lead.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    const { rows } = await pool.query(
+      `SELECT
+         f.*,
+         u.name AS employee_name
+       FROM follow_up_activities f
+       LEFT JOIN users u ON u.id = f.user_id
+       WHERE f.lead_id = $1
+       ORDER BY f.created_at DESC, f.id DESC`,
+      [leadId]
+    );
+
+    res.json({ followUps: rows });
+  })
+);
+// Update an existing follow-up activity.
+// URL: PATCH /:leadId/follow-ups/:followUpId
+router.patch(
+  '/:leadId/follow-ups/:followUpId',
+
+  asyncHandler(async (req, res) => {
+    const leadId = Number(req.params.leadId);
+    const followUpId = Number(req.params.followUpId);
+
+    // Validate lead ID.
+    if (!Number.isInteger(leadId) || leadId <= 0) {
+      throw new HttpError(400, 'Invalid lead ID');
+    }
+
+    // Validate follow-up ID.
+    if (!Number.isInteger(followUpId) || followUpId <= 0) {
+      throw new HttpError(400, 'Invalid follow-up ID');
+    }
+
+    // Validate request body.
+    const data = followUpActivityUpdateSchema.parse(req.body);
+
+    // Find follow-up and verify that it belongs to this lead.
+    const existingResult = await pool.query(
+      `SELECT
+         f.*,
+         l.assigned_user_id
+       FROM follow_up_activities f
+       JOIN leads l ON l.id = f.lead_id
+       WHERE f.id = $1
+         AND l.id = $2`,
+      [followUpId, leadId]
+    );
+
+    const existing = existingResult.rows[0];
+
+    if (!existing) {
+      throw new HttpError(404, 'Follow-up not found');
+    }
+
+    // Employees can only update follow-ups for their own assigned leads.
+    if (
+      req.user.role === 'employee' &&
+      existing.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    // Build update query dynamically using validated fields only.
+    const fields = [];
+    const values = [];
+
+    for (const [key, value] of Object.entries(data)) {
+      fields.push(`${key} = $${values.length + 1}`);
+      values.push(value);
+    }
+
+    // Maintain completion timestamp.
+    if (data.status === 'Completed') {
+      fields.push('completed_at = NOW()');
+    } else if (data.status !== undefined) {
+      fields.push('completed_at = NULL');
+    }
+
+    // Update modification timestamp.
+    fields.push('updated_at = NOW()');
+
+    values.push(followUpId);
+
+    const { rows } = await pool.query(
+      `UPDATE follow_up_activities
+       SET ${fields.join(', ')}
+       WHERE id = $${values.length}
+       RETURNING *`,
+      values
+    );
+
+    res.json({
+      message: 'Follow-up updated successfully',
+      followUp: rows[0],
+    });
+  })
+);
 router.get(
   '/:id',
   asyncHandler(async (req, res) => {
@@ -211,6 +650,8 @@ router.get(
     res.json({ lead });
   })
 );
+
+
 
 const createSchema = z.object({
   name: z.string().min(1),
@@ -409,6 +850,94 @@ async function applyLeadUpdate(req, res, { requireOwnership }) {
     writeBackLead(id).catch((err) => console.error('Sheet write-back failed:', err.message));
   }
 }
+
+
+// Schedule, reschedule, or update the status of a follow-up.
+const followUpUpdateSchema = z.object({
+  next_follow_up: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD format')
+    .nullable()
+    .optional(),
+  next_follow_up_status: z
+    .enum(['Scheduled', 'Done', 'Missed', 'No Response'])
+    .nullable()
+    .optional(),
+}).refine(
+  (data) =>
+    data.next_follow_up !== undefined ||
+    data.next_follow_up_status !== undefined,
+  { message: 'Provide a follow-up date or status' }
+);
+
+router.patch(
+  '/follow-ups/:id',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new HttpError(400, 'Invalid lead ID');
+    }
+
+    const data = followUpUpdateSchema.parse(req.body);
+
+    const beforeRes = await pool.query(
+      'SELECT * FROM leads WHERE id = $1',
+      [id]
+    );
+
+    const before = beforeRes.rows[0];
+
+    if (!before) throw new HttpError(404, 'Lead not found');
+
+    if (
+      req.user.role === 'employee' &&
+      before.assigned_user_id !== req.user.id
+    ) {
+      throw new HttpError(403, 'Forbidden');
+    }
+
+    const updates = {};
+
+    if (data.next_follow_up !== undefined) {
+      updates.next_follow_up = data.next_follow_up;
+    }
+
+    if (data.next_follow_up_status !== undefined) {
+      updates.next_follow_up_status = data.next_follow_up_status;
+    }
+
+    const fields = Object.keys(updates);
+    const values = fields.map((field) => updates[field]);
+    const setClauses = fields.map(
+      (field, index) => `${field} = $${index + 1}`
+    );
+
+    values.push(id);
+
+    await pool.query(
+      `UPDATE leads
+       SET ${setClauses.join(', ')}, updated_at = NOW()
+       WHERE id = $${values.length}`,
+      values
+    );
+
+    await logFieldChanges({
+      userId: req.user.id,
+      leadId: id,
+      before,
+      after: updates,
+      fields,
+    });
+
+    const { rows } = await pool.query(
+      `${LEAD_SELECT} WHERE leads.id = $1`,
+      [id]
+    );
+
+    res.json({ lead: rows[0] });
+  })
+);
 
 router.patch(
   '/:id',

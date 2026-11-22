@@ -9,6 +9,9 @@ import Employees from './pages/admin/Employees.jsx';
 import EmployeeDashboard from './pages/employee/Dashboard.jsx';
 import MyLeads from './pages/employee/MyLeads.jsx';
 import FollowUpsDue from './pages/employee/FollowUpsDue.jsx';
+import Pipeline from './pages/Pipeline.jsx';
+import LeadProfile from './pages/LeadProfile.jsx';
+import FollowUps from './pages/FollowUps.jsx';
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -28,14 +31,17 @@ export default function App() {
               <Route index element={<Dashboard />} />
               <Route path="leads" element={<AdminLeads />} />
               <Route path="employees" element={<Employees />} />
+              <Route path="pipeline" element={<Pipeline />} />
+              <Route path="follow-ups" element={<FollowUps />} />
             </>
           ) : (
             <>
               <Route index element={<EmployeeDashboard />} />
               <Route path="leads" element={<MyLeads />} />
-              <Route path="follow-ups" element={<FollowUpsDue />} />
+              <Route path="follow-ups" element={<FollowUps />} />
             </>
           )}
+          <Route path="leads/:id" element={<LeadProfile />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>

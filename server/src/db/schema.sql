@@ -133,3 +133,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_lead ON audit_log(lead_id);
 CREATE INDEX IF NOT EXISTS idx_audit_field_created ON audit_log(field, created_at);
+
+
+CREATE TABLE IF NOT EXISTS lead_activities (
+  id SERIAL PRIMARY KEY,
+  lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  activity_type TEXT NOT NULL CHECK (
+    activity_type IN ('call', 'email', 'meeting', 'note', 'other')
+  ),
+  description TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lead_activities_lead_created
+ON lead_activities(lead_id, created_at DESC);

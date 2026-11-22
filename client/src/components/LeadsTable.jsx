@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ContactIcon } from './icons.jsx';
 import { PhoneLink } from './PhoneLink.jsx';
 import { EmailLink } from './EmailLink.jsx';
-
+import { Link } from 'react-router-dom';
 const STATUS_OPTIONS = ['Won', 'Lost', 'Not answered', 'Contacted', 'Broker'];
 const PRIORITY_OPTIONS = ['P1', 'P2', 'P3', 'P5'];
 
@@ -262,16 +262,22 @@ export default function LeadsTable({
                 </td>
               )}
               <td className={`${td} whitespace-nowrap font-medium text-slate-800`}>
-                {lead.name}
-                {lead.recur_count > 1 && (
-                  <span
-                    className="ml-1.5 inline-flex items-center rounded-full bg-amber-50 px-1.5 py-0.5 text-[0.65rem] font-semibold text-amber-700"
-                    title={`This person has submitted a lead form ${lead.recur_count} times`}
-                  >
-                    ↻{lead.recur_count}
-                  </span>
-                )}
-              </td>
+  <Link
+    to={`/leads/${lead.id}`}
+    className="text-slate-800 transition hover:text-indigo-600 hover:underline"
+  >
+    {lead.name || 'Unnamed lead'}
+  </Link>
+
+  {lead.recur_count > 1 && (
+    <span
+      className="ml-1.5 inline-flex items-center rounded-full bg-amber-50 px-1.5 py-0.5 text-[0.65rem] font-semibold text-amber-700"
+      title={`This person has submitted a lead form ${lead.recur_count} times`}
+    >
+      ↻{lead.recur_count}
+    </span>
+  )}
+</td>
               <td className={`${td} whitespace-nowrap text-slate-600`}>
                 <PhoneLink number={lead.mob} />
               </td>
